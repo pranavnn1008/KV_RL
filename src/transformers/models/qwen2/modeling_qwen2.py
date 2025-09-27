@@ -154,8 +154,89 @@ class Qwen2Attention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
+        if past_key_values.layers[self.layer_idx].keys is not None:
+            assert 0, (hidden_states.shape, past_key_values.layers[0].keys.shape, key_states.shape, self.config.num_attention_heads, self.config.num_key_value_heads)
+
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,  # main diff with Llama
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+
+class Qwen2AttentionRouting(Qwen2Attention):
+
+    def __init__(self, config: Qwen2Config, layer_idx: int, num_samples: int):
+        super().__init__(config, layer_idx)
+
+        self.num_samples = num_samples
+
+        self.router = nn.Linear(num_samples, num_samples)
+        self.sample_position = nn.Embedding(num_embeddings=2, embedding_dim=self.head_dim)
+
+    @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # routing
+        keys_states = key_states.reshape(key_states.shape[0] // self.num_samples, self.num_samples, *key_states.shape[1:])
+        key_states = torch.tile(key_states, (1, self.num_samples, 1, 1, 1))
+        key_states = key_states.reshape(key_states.shape[0], self.num_samples, self.num_samples, *key_states.shape[2:])
+
+        value_states = value_states.reshape(value_states.shape[0] // self.num_samples, self.num_samples, *value_states.shape[1:])
+        value_states = torch.tile(value_states, (1, self.num_samples, 1, 1, 1))
+        value_states = value_states.reshape(value_states.shape[0], self.num_samples, self.num_samples, *value_states.shape[2:])
+
+        position_bias = self.sample_position(torch.eye(self.num_samples, device="cuda"))
+        position_bias = position_bias.reshape(1, *position_bias.shape[:2], 1, 1, position_bias.shape[2])
+
+        key_states_router = torch.einsum('abcdef,ct->abtdef' key_states + position_bias, self.router.weight)
+        key_states_router = torch.softmax(key_states_router, dim=2)
+        key_states = key_states * key_states_router
+        key_states = key_states.sum(dim=2)
+        key_states = key_states.reshape(keys_states.shape[0] * self.num_samples, *key_states.shape[2:])
+
+        value_states = value_states * key_states_router
+        value_states = value_states.sum(dim=2)
+        value_states = value_states.reshape(value_states.shape[0] * self.num_samples, *value_states.shape[2:])
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
