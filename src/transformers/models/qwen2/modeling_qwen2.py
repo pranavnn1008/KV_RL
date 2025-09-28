@@ -217,26 +217,28 @@ class Qwen2AttentionRouting(Qwen2Attention):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # routing
-        keys_states = key_states.reshape(key_states.shape[0] // self.num_samples, self.num_samples, *key_states.shape[1:])
-        key_states = torch.tile(key_states, (1, self.num_samples, 1, 1, 1))
-        key_states = key_states.reshape(key_states.shape[0], self.num_samples, self.num_samples, *key_states.shape[2:])
+        if past_key_values is None or past_key_values.layers[self.layer_idx].keys is not None:
+            keys_states = key_states.reshape(key_states.shape[0] // self.num_samples, self.num_samples, *key_states.shape[1:])
+            key_states = torch.tile(key_states, (1, self.num_samples, 1, 1, 1))
+            key_states = key_states.reshape(key_states.shape[0], self.num_samples, self.num_samples, *key_states.shape[2:])
 
-        value_states = value_states.reshape(value_states.shape[0] // self.num_samples, self.num_samples, *value_states.shape[1:])
-        value_states = torch.tile(value_states, (1, self.num_samples, 1, 1, 1))
-        value_states = value_states.reshape(value_states.shape[0], self.num_samples, self.num_samples, *value_states.shape[2:])
+            value_states = value_states.reshape(value_states.shape[0] // self.num_samples, self.num_samples, *value_states.shape[1:])
+            value_states = torch.tile(value_states, (1, self.num_samples, 1, 1, 1))
+            value_states = value_states.reshape(value_states.shape[0], self.num_samples, self.num_samples, *value_states.shape[2:])
 
-        position_bias = self.sample_position(torch.eye(self.num_samples, device="cuda"))
-        position_bias = position_bias.reshape(1, *position_bias.shape[:2], 1, 1, position_bias.shape[2])
+            position_bias = self.sample_position(torch.eye(self.num_samples, device="cuda"))
+            position_bias = position_bias.reshape(1, *position_bias.shape[:2], 1, 1, position_bias.shape[2])
 
-        key_states_router = torch.einsum('abcdef,ct->abtdef' key_states + position_bias, self.router.weight)
-        key_states_router = torch.softmax(key_states_router, dim=2)
-        key_states = key_states * key_states_router
-        key_states = key_states.sum(dim=2)
-        key_states = key_states.reshape(keys_states.shape[0] * self.num_samples, *key_states.shape[2:])
+            key_states_router = torch.einsum('abcdef,ct->abtdef' key_states + position_bias, self.router.weight)
+            key_states_router = torch.softmax(key_states_router, dim=2)
 
-        value_states = value_states * key_states_router
-        value_states = value_states.sum(dim=2)
-        value_states = value_states.reshape(value_states.shape[0] * self.num_samples, *value_states.shape[2:])
+            key_states = key_states * key_states_router
+            key_states = key_states.sum(dim=2)
+            key_states = key_states.reshape(keys_states.shape[0] * self.num_samples, *key_states.shape[2:])
+
+            value_states = value_states * key_states_router
+            value_states = value_states.sum(dim=2)
+            value_states = value_states.reshape(value_states.shape[0] * self.num_samples, *value_states.shape[2:])
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
