@@ -188,7 +188,7 @@ class Qwen2Attention(nn.Module):
 
 class Qwen2AttentionRouting(Qwen2Attention):
 
-    def __init__(self, config: Qwen2Config, layer_idx: int, num_samples: int):
+    def __init__(self, config: Qwen2Config, layer_idx: int, num_samples: int = 16):
         super().__init__(config, layer_idx)
 
         self.num_samples = num_samples
@@ -229,7 +229,7 @@ class Qwen2AttentionRouting(Qwen2Attention):
             position_bias = self.sample_position(torch.eye(self.num_samples, device="cuda"))
             position_bias = position_bias.reshape(1, *position_bias.shape[:2], 1, 1, position_bias.shape[2])
 
-            key_states_router = torch.einsum('abcdef,ct->abtdef' key_states + position_bias, self.router.weight)
+            key_states_router = torch.einsum('abcdef,ct->abtdef', key_states + position_bias, self.router.weight)
             key_states_router = torch.softmax(key_states_router, dim=2)
 
             key_states = key_states * key_states_router
@@ -292,7 +292,7 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Qwen2Attention(config=config, layer_idx=layer_idx)
+        self.self_attn = Qwen2AttentionRouting(config=config, layer_idx=layer_idx)
 
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -349,7 +349,7 @@ class Qwen2PreTrainedModel(PreTrainedModel):
     _supports_attention_backend = True
     _can_record_outputs = {
         "hidden_states": Qwen2DecoderLayer,
-        "attentions": Qwen2Attention,
+        "attentions": Qwen2AttentionRouting,
     }
 
 
