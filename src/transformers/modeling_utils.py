@@ -4598,6 +4598,8 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         _ = kwargs.pop("from_flax", None)
         _ = kwargs.pop("offload_state_dict", None)
 
+        num_samples = kwargs.pop("n_samples_per_prompt", None)
+
         # For BC on torch_dtype argument
         if torch_dtype is not None:
             logger.warning_once("`torch_dtype` is deprecated! Use `dtype` instead!")
@@ -4789,6 +4791,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
                 _from_pipeline=from_pipeline,
                 **kwargs,
             )
+            config.num_samples = num_samples
             if "gguf_file" in model_kwargs:
                 model_kwargs.pop("gguf_file")
         else:

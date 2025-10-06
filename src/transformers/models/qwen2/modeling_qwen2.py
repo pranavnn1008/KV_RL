@@ -188,10 +188,10 @@ class Qwen2Attention(nn.Module):
 
 class Qwen2AttentionRouting(Qwen2Attention):
 
-    def __init__(self, config: Qwen2Config, layer_idx: int, num_samples: int = 16):
+    def __init__(self, config: Qwen2Config, layer_idx: int):
         super().__init__(config, layer_idx)
 
-        self.num_samples = num_samples
+        self.num_samples = config.num_samples
 
         self.router = nn.Linear(num_samples, num_samples)
         self.sample_position = nn.Embedding(num_embeddings=2, embedding_dim=self.head_dim)
